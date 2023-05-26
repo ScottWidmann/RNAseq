@@ -1,0 +1,133 @@
+---
+title: "GSE144800 Gene Set Enrichment Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Differential Expression and Gene Set Enrichment Analysis
+
+Data from *estrogen receptor* $\beta$ *exerts tumor suppressive effects in prostate cancer through repression of androgen receptor activity* (GSE144800) was first analyzed with the [STAR_RSEM.nf pipeline](https://github.com/ScottWidmann/RNAseq/blob/main/STAR/STAR_RSEM.nf). SRA files can be downloaded with the erbeta_prefetch_dump.sh script and erbeta_list.txt. SRR11027009-SRR11027011 are the control samples (DMSO) and SRR11027015-SRR11027017 are the treated samples (LY3201).
+
+## Clean up Ensembl gene IDs
+
+```{bash}
+# remove decimal points from gene names in gene-level expression files from RSEM in current wd
+for i in *genes.results
+do
+ sed 's/\.[0-9]*//' $i > $i.clean
+done
+ 
+```
+
+## Differential Expression Analysis using DESeq2
+
+```{r, message=FALSE,warning=FALSE}
+library(DESeq2)
+library(tidyverse)
+library(purrr)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+
+#read in cleaned gene counts and make gene count matrix
+gene_matrix<- list.files(pattern = "*.clean", full.names = T) %>%
+  lapply(read_delim) %>% 
+  purrr::reduce(full_join, by="gene_id") %>%
+  column_to_rownames(var = "gene_id") %>% 
+  dplyr::select(starts_with("expected_count")) %>% 
+  dplyr::rename(control1 =1, control2=2, control3=3, treat1=4, treat2=5, treat3=6)
+
+#make sample data frame
+colData<- data.frame(sample = c("control1", "control2", "control3", "treat1", "treat2", "treat3"), treatment = c("DMSO", "DMSO", "DMSO", "LY", "LY", "LY"), row.names = 1)
+
+dds<- DESeqDataSetFromMatrix(countData = round(gene_matrix), colData = colData, design = ~treatment)
+#set control
+dds$treatment <- relevel(dds$treatment, ref = "DMSO")
+#remove low counts
+keep<- rowSums(counts(dds)) >= 1
+dds<- dds[keep,]
+#run DESeq
+dds<- DESeq(dds)
+res<- results(dds)
+
+#add gene symbols
+res$symbol<- mapIds(org.Hs.eg.db, keys = row.names(res),
+                    column = "SYMBOL",
+                    keytype = "ENSEMBL",
+                    multiVals = "first")
+write.csv(as.data.frame(res), file="resultsSummary.csv")
+
+#make fgsea input (need named vector) from results using test statistic for ranking; remove NAs and duplicates
+res_filtered<- as.data.frame(res) %>% dplyr::select(symbol, stat) %>% na.omit() %>% distinct() %>% group_by(symbol) %>% summarise(stat=mean(stat)) %>% filter(!duplicated(stat))
+fgsea_input<- res_filtered$stat
+names(fgsea_input)<-res_filtered$symbol
+
+#make Broad GSEA input and save as rnk file
+broad_input<- as.data.frame(res) %>% rownames_to_column(var = "gene_id") %>% dplyr::select(symbol, stat) %>% na.omit() %>% distinct() %>% group_by(symbol) %>% summarise(stat=mean(stat)) %>% filter(!duplicated(stat)) %>% arrange(desc(stat)) %>% `colnames<-`(NULL)
+write.table(broad_input, file = "broad_input.rnk", quote = F, sep = "\t", row.names = F, col.names = F)
+
+#LFC shrinkage
+resLFC<-lfcShrink(dds, coef = "treatment_LY_vs_DMSO", type="apeglm")
+#filter for adjusted p-value < 0.05 and save
+resLFC <- as.data.frame(subset(resLFC, padj <0.05))
+write.csv(resLFC, file = "LFCshrink_results.csv")
+
+```
+
+## Gene set enrichment with fgsea R package
+
+```{r, warning=FALSE}
+library(msigdbr)
+library(fgsea)
+library(data.table)
+library(ggplot2)
+
+#get hallmarks gene sets using msigdbr package
+hallmarks = msigdbr(species = "human", category = "H")
+hallmarks_list = split(hallmarks$gene_symbol, f = hallmarks$gs_name)
+
+#run fgsea multilevel
+fgsea_res<-fgsea(pathways=hallmarks_list, fgsea_input, minSize= 5, maxSize=500)
+
+#sort results by adjusted p-value and save for reference
+fgsea_res_ordered<-fgsea_res[order(padj), ]
+fwrite(fgsea_res_ordered, file = "fgsea_table.csv", sep=",", sep2=c("", " ",""))
+
+#plot table of top 10 up/down pathways
+topPathwaysUp<- fgsea_res[ES > 0][head(order(pval), n=10), pathway]
+topPathwaysDown<- fgsea_res[ES <0][head(order(pval), n=10), pathway]
+topPathways<- c(topPathwaysUp, rev(topPathwaysDown))
+plotGseaTable(hallmarks_list[topPathways], fgsea_input, fgsea_res)#, colwidths = c(8,4,1,1.5,1.5))
+
+#Enrichment plot for androgen response
+plotEnrichment(hallmarks_list[["HALLMARK_ANDROGEN_RESPONSE"]], fgsea_input) + labs(title = "Androgen Response")
+```
+
+## Using Broad GSEA command line interface
+
+```{bash, collapse=TRUE}
+cp broad_input.rnk GSEA_4.3.2
+cd GSEA_4.3.2
+#run gsea preranked
+./gsea-cli.sh GSEAPreranked -gmx h.all.v7.5.1.symbols.gmt -rnk broad_input.rnk -out ./ -rpt_label broad_results -zip_report true
+mv broad_results.GseaPreranked* broad_results
+mv broad_results/*.zip results.zip
+
+#run leading edge analysis for androgen and estrogen response gene sets
+./gsea-cli.sh LeadingEdgeTool -dir broad_results -enrichment_zip results.zip -out leadingEdge \
+-gsets HALLMARK_ANDROGEN_RESPONSE,HALLMARK_ESTROGEN_RESPONSE_EARLY,HALLMARK_ESTROGEN_RESPONSE_LATE
+mv leadingEdge/my_analysis* leadingEdgeResults && rm -r leadingEdge
+```
+
+## Results
+
+```{r, echo=FALSE}
+htmltools::includeHTML("GSEA_4.3.2/broad_results/HALLMARK_ANDROGEN_RESPONSE.html")
+
+knitr::include_graphics("GSEA_4.3.2/broad_results/enplot_HALLMARK_ANDROGEN_RESPONSE_45.png")
+
+knitr::include_graphics("GSEA_4.3.2/leadingEdgeResults/leading_edge_heat_map_clustered.png")
+```
