@@ -113,7 +113,7 @@ workflow {
     rsem_index_ch = RSEM_INDEX(params.genome, params.gtf)
     alignment_ch = ALIGNMENT(read_pairs_ch, index_ch, rsem_index_ch)
     fastqc_ch = FASTQC(read_pairs_ch)
-    MULTIQC(fastqc_ch).collect()
+    MULTIQC(alignment_ch.mix(fastqc_ch).collect())
 }
 
 workflow.onComplete {
