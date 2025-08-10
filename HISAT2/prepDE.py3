@@ -7,7 +7,7 @@ from collections import defaultdict
 
 parser=OptionParser(description='Generates two CSV files containing the count matrices for genes and transcripts, using the coverage values found in the output of `stringtie -e`')
 parser.add_option('-i', '--input', '--in', default='.', help="a folder containing all sample sub-directories, or a text file with sample ID and path to its GTF file on each line [default: %default/]")
-parser.add_option('-g', default='gene_count_matrix.csv', help="where to output the gene count matrix [default: %default")
+parser.add_option('-g', default='gene_count_matrix.csv', help="where to output the gene count matrix [default: %default]")
 parser.add_option('-t', default='transcript_count_matrix.csv', help="where to output the transcript count matrix [default: %default]")
 parser.add_option('-l', '--length', default=75, type='int', help="the average read length [default: %default]")
 parser.add_option('-p', '--pattern', default=".", help="a regular expression that selects the sample subdirectories")
@@ -30,7 +30,7 @@ if (os.path.isfile(opts.input)):
                 if (len(lineLst) != 2):
                     print("Error: line should have a sample ID and a file path:\n%s" % (line.strip()))
                     exit(1)
-                if lineLst[0] in samples:
+                if any(sample_id == lineLst[0] for sample_id, _ in samples):
                     print("Error: non-unique sample ID (%s)" % (lineLst[0]))
                     exit(1)
                 if not os.path.isfile(lineLst[1]):
